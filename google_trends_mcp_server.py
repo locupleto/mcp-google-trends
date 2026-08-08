@@ -21,15 +21,12 @@ from trendspy import Trends
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, CallToolResult, ListToolsResult
 
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("google-trends-mcp")
-
-# Initialize MCP server
-server = Server("google-trends")
 
 # Initialize trendspy client with 5-second delay between requests
 _trends = Trends(request_delay=5.0)
@@ -381,7 +378,6 @@ async def _get_interest_by_region(arguments: dict) -> dict:
 
 # --- Tool Registration ---
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available Google Trends tools."""
     return [
@@ -542,7 +538,6 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute a Google Trends tool."""
     try:
@@ -569,6 +564,37 @@ async def execute_tool(name: str, arguments: dict) -> Any:
         raise ValueError(f"Unknown tool: {name}")
 
     return await handler(arguments)
+
+
+# --- MCP SDK 2.x adapters ----------------------------------------------------
+# list_tools()/call_tool() above keep their v1 signatures so tests and scripts
+# can import and call them directly. These thin adapters bridge them to the
+# SDK 2.x handler contract (ctx/params in, *Result models out) and restore v1
+# error semantics: any exception from the legacy handler becomes
+# CallToolResult(is_error=True, text=str(e)) — readable by the model — instead
+# of an opaque JSON-RPC internal error.
+
+async def _on_list_tools(ctx, params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(ctx, params) -> CallToolResult:
+    try:
+        content = await call_tool(params.name, params.arguments or {})
+        return CallToolResult(content=list(content), is_error=False)
+    except Exception as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))],
+            is_error=True,
+        )
+
+
+server = Server(
+    "google-trends",
+    version="1.0.0",
+    on_list_tools=_on_list_tools,
+    on_call_tool=_on_call_tool,
+)
 
 
 async def main():
